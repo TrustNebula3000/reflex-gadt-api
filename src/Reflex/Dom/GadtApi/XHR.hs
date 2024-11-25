@@ -30,47 +30,51 @@ type ApiEndpoint = Text
 -- @
 --
 performXhrRequests
-  :: forall t m api.
-     ( Has FromJSON api
+  :: forall t m e api.
+     ( FromJSON e
+     , Has FromJSON api
      , forall a. ToJSON (api a)
      , Prerender t m
      , Applicative m
      )
   => ApiEndpoint
+  -> (Text -> e)
   -> Event t (RequesterData api)
-  -> m (Event t (RequesterData (Either Text)))
+  -> m (Event t (RequesterData (Either e)))
 performXhrRequests apiUrl req = fmap switchPromptlyDyn $ prerender (pure never) $ do
   performEventAsync $ ffor req $ \r yield -> do
     ctx <- askJSM
     void $ liftIO $ forkIO $ flip runJSM ctx $
-      liftIO . yield =<< apiRequestXhr apiUrl r
+      liftIO . yield =<< apiRequestXhr apiUrl errFn r
 
 -- | Encodes an API request as JSON and issues an 'XhrRequest',
 -- and attempts to decode the response.
 apiRequestXhr
-  :: forall api m.
+  :: forall e, api m.
      ( MonadIO m
      , MonadJSM m
+     , Has FromJSON e
      , Has FromJSON api
      , forall a. ToJSON (api a)
      )
   => ApiEndpoint
+  -> (Text -> e)
   -> RequesterData api
-  -> m (RequesterData (Either Text))
-apiRequestXhr apiUrl = traverseRequesterData $ \x ->
+  -> m (RequesterData (Either e))
+apiRequestXhr apiUrl errFn = traverseRequesterData $ \x ->
   has @FromJSON @api x $ mkRequest x
   where
     mkRequest
-      :: (MonadJSM m, FromJSON b)
+      :: FromJSON b
       => api b
-      -> m (Either Text b)
+      -> m (Either e b)
     mkRequest req = do
       response <- liftIO newEmptyMVar
       _ <- newXMLHttpRequest (postJson apiUrl req) $
         liftIO . putMVar response
       xhrResp <- liftIO $ takeMVar response
       case decodeXhrResponse xhrResp of
-        Nothing -> pure $ Left $
+        Nothing -> pure $ Left . errFn $
           "Response could not be decoded for request: " <>
             T.decodeUtf8 (LBS.toStrict $ encode req)
-        Just r -> pure $ Right r
+        Just r -> pure r
